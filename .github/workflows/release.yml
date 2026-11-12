@@ -1,0 +1,87 @@
+name: Release
+
+# LightCI's private release workflow pushes the install files and a vX.Y.Z tag here. This job then
+# takes the same path a customer does: it pulls the public images and chart without logging in,
+# checks their signatures, builds the offline bundle and publishes the release and the update index.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)publish, e.g. v1.0.5
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  IMAGE_BASE: ghcr.io/lightconsultinginc/activate
+  CHART: ghcr.io/lightconsultinginc/charts/activate
+  SIGNER: ^https://github.com/LightConsultingInc/lightci-activate/
+  ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - id: v
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"; echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.v.outputs.tag }}
+      - uses: sigstore/cosign-installer@v3
+      - uses: azure/setup-helm@v4
+      - name: Pull and verify, anonymously
+        run: |
+          set -euo pipefail
+          V=${{ steps.v.outputs.version }}
+          B=activate-$V-bundle
+          mkdir -p "$B/images" "$B/charts" "$B/compose" "$B/terraform"
+          for img in server web; do
+            D=$(awk -v n="$img" '$1==n{print $2}' release/DIGESTS)
+            test -n "$D" || { echo "release/DIGESTS has no $img digest"; exit 1; }
+            # The tag must point at the digest LightCI signed.
+            cosign verify "$IMAGE_BASE/$img@$D" --certificate-identity-regexp "$SIGNER" --certificate-oidc-issuer "$ISSUER" > /dev/null
+            T=$(docker buildx imagetools inspect "$IMAGE_BASE/$img:$V" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            test "$T" = "$D" || { echo "$img:$V is $T, signed digest is $D"; exit 1; }
+            docker pull --platform linux/amd64 "$IMAGE_BASE/$img@$D"
+            docker tag "$IMAGE_BASE/$img@$D" "$IMAGE_BASE/$img:$V"
+            docker save "$IMAGE_BASE/$img:$V" -o "$B/images/$img.tar"
+          done
+          cosign verify "$CHART:$V" --certificate-identity-regexp "$SIGNER" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          helm pull "oci://$CHART" --version "$V" -d "$B/charts"
+          cp compose/docker-compose.yml compose/.env.example "$B/compose/"
+          cp -r terraform/aws "$B/terraform/aws"
+          cp release/*.spdx.json release/DIGESTS LICENSE "$B/"
+          (cd "$B" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          tar -czf "$B.tgz" "$B"
+          sha256sum "$B.tgz" > "$B.tgz.sha256"
+          tar -czf "activate-terraform-aws-$V.tgz" -C terraform aws
+          cp compose/.env.example default.env.example
+          cp "$B/charts/activate-$V.tgz" .
+      - name: Release index (what installed copies read once a day)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node .github/scripts/release-index.mjs --repo "${{ github.repository }}" \
+            --version "${{ steps.v.outputs.version }}" --notes RELEASE_NOTES.md --out index.json
+          cat index.json
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: Activate ${{ steps.v.outputs.tag }}
+          body_path: release/notes.md
+          make_latest: "true"
+          files: |
+            activate-${{ steps.v.outputs.version }}-bundle.tgz
+            activate-${{ steps.v.outputs.version }}-bundle.tgz.sha256
+            activate-terraform-aws-${{ steps.v.outputs.version }}.tgz
+            activate-${{ steps.v.outputs.version }}.tgz
+            compose/docker-compose.yml
+            default.env.example
+            release/server-sbom.spdx.json
+            release/web-sbom.spdx.json
+            index.json

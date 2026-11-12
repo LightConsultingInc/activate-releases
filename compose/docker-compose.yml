@@ -1,0 +1,154 @@
+# Self-hosted Activate for evaluation on one machine.
+#
+#   cp .env.example .env     # fill in the license, identity provider, Anthropic key, encryption key
+#   docker compose up -d
+#   docker compose exec worker activate doctor
+#
+# Not for production: Postgres runs in a container with a local volume, there is no high
+# availability and no backup. The Helm chart and the Terraform module are the supported installs.
+name: activate
+
+x-activate-env: &activate-env
+  ACTIVATE_EDITION: self-hosted
+  NODE_ENV: production
+  PORT: "3000"
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USERNAME: activate
+  DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+  DB_DATABASE: activate
+  # Compose's bundled Postgres speaks plain TCP on the project's private network. Production refuses
+  # that unless told explicitly; this stack is a single-node evaluation, so it says so (and is warned).
+  DB_SSL_MODE: disable
+  DB_SSL_ALLOW_PLAINTEXT: "true"
+  WEB_URL: ${WEB_URL:-http://localhost:8080}
+  PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8081}
+  CORS_ORIGINS: ${WEB_URL:-http://localhost:8080}
+  ACTIVATE_SECRETS_KEY: ${ACTIVATE_SECRETS_KEY:?set ACTIVATE_SECRETS_KEY in .env}
+  ACTIVATE_LICENSE: ${ACTIVATE_LICENSE:?set ACTIVATE_LICENSE in .env}
+  AUTH_PROVIDER: ${AUTH_PROVIDER:-oidc}
+  AUTH_OIDC_ISSUER: ${AUTH_OIDC_ISSUER:-}
+  AUTH_OIDC_CLIENT_ID: ${AUTH_OIDC_CLIENT_ID:-}
+  AUTH_OIDC_CLIENT_SECRET: ${AUTH_OIDC_CLIENT_SECRET:-}
+  AUTH_GROUPS_CLAIM: ${AUTH_GROUPS_CLAIM:-groups}
+  AUTH_ROLE_MAP: ${AUTH_ROLE_MAP:-}
+  WORKOS_API_KEY: ${WORKOS_API_KEY:-}
+  WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
+  AI_PROVIDER: live
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+  ANTHROPIC_FAST_MODEL: ${ANTHROPIC_FAST_MODEL:-claude-sonnet-5}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  LIBRARY_PROVIDER: ${LIBRARY_PROVIDER:-local}
+  LIBRARY_REPOSITORY: ${LIBRARY_REPOSITORY:-}
+  LIBRARY_GIT_TOKEN: ${LIBRARY_GIT_TOKEN:-}
+  LIBRARY_REMOTE_URL: ${LIBRARY_REMOTE_URL:-}
+  # A single node may keep the marketplace in a local folder; say so explicitly. The image's folder is
+  # read-only, so the working copy lives under /data (LIBRARY_WORK_DIR) and survives restarts.
+  LIBRARY_ALLOW_LOCAL: "true"
+  LIBRARY_REPO_PATH: /marketplace
+  LIBRARY_WORK_DIR: /data/marketplace-work
+  LIBRARY_CLONES_DIR: /data/marketplace-clones
+  MCP_APP_HTML: /mcp-app/dist/app.html
+  ACTIVATE_ORG_NAME: ${ACTIVATE_ORG_NAME:-}
+  ACTIVATE_ORG_SLUG: ${ACTIVATE_ORG_SLUG:-}
+  ACTIVATE_ORG_EMAIL_DOMAINS: ${ACTIVATE_ORG_EMAIL_DOMAINS:-}
+  ACTIVATE_ORG_INITIAL_ADMINS: ${ACTIVATE_ORG_INITIAL_ADMINS:-}
+  LEAD_EMAIL_DOMAINS: ""
+  WORKER_TIMEZONE: ${WORKER_TIMEZONE:-UTC}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Daily read of the release index so admins see when a newer release exists; nothing is sent.
+  UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
+  # A private CA your identity provider or Git host uses (PEM file mounted into the containers).
+  NODE_EXTRA_CA_CERTS: ${NODE_EXTRA_CA_CERTS:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: activate
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: activate
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U activate -d activate"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    image: ${ACTIVATE_IMAGE:-ghcr.io/lightconsultinginc/activate/server}:${ACTIVATE_VERSION:-1.0.5}
+    command: ["activate", "migrate"]
+    environment:
+      <<: *activate-env
+      ACTIVATE_ROLE: api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ${ACTIVATE_IMAGE:-ghcr.io/lightconsultinginc/activate/server}:${ACTIVATE_VERSION:-1.0.5}
+    environment:
+      <<: *activate-env
+      ACTIVATE_ROLE: api
+    volumes:
+      - activate-data:/data
+    ports:
+      - "${API_PORT:-8081}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/ready >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: ${API_REPLICAS:-1}
+    restart: unless-stopped
+
+  worker:
+    image: ${ACTIVATE_IMAGE:-ghcr.io/lightconsultinginc/activate/server}:${ACTIVATE_VERSION:-1.0.5}
+    environment:
+      <<: *activate-env
+      ACTIVATE_ROLE: worker
+    volumes:
+      - activate-data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/ready >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  web:
+    image: ${ACTIVATE_WEB_IMAGE:-ghcr.io/lightconsultinginc/activate/web}:${ACTIVATE_VERSION:-1.0.5}
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      WEB_URL: ${WEB_URL:-http://localhost:8080}
+      API_URL: http://api:3000
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8081}
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-oidc}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      WORKOS_API_KEY: ${WORKOS_API_KEY:-}
+      WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
+      WORKOS_COOKIE_PASSWORD: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+    ports:
+      - "${WEB_PORT:-8080}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  activate-data:

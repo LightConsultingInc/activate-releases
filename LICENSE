@@ -1,0 +1,20 @@
+LightCI Activate
+Copyright (c) 2026 13819361 Canada Inc., doing business as LightCI. All rights reserved.
+
+This software, its container images, Helm chart, Terraform module, Compose files and
+documentation are proprietary to LightCI.
+
+You may install and use them only under a written agreement with LightCI and a valid licence key
+issued by LightCI, and only within the scope of that agreement. No other licence or right is
+granted, by implication, estoppel or otherwise. Except as that agreement allows, or as applicable
+law permits despite this restriction, you may not copy, modify, distribute, sublicense, sell, rent,
+reverse engineer, decompile or disassemble them, or remove or circumvent the licence-key check.
+
+Third-party components included in the images keep their own licences. They are listed in the
+SPDX software bills of materials published with each release.
+
+Unless your agreement with LightCI says otherwise, the software is provided "as is", without
+warranty of any kind, and LightCI is not liable for any claim, damages or other liability arising
+from it or its use.
+
+Questions: legal@lightci.com
